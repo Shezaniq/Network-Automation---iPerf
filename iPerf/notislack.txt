@@ -1,0 +1,33 @@
+#!/bin/sh
+if [ $# -ne 0 ] ; then
+    is_cmdline=1
+    msg="$*"
+fi
+
+
+if [ -z "$bot_source" ] ; then
+        echo "No bot_source set in env"
+        exit 1
+else
+        (if [ ! -z $is_cmdline ]  ; then echo "$msg"; else cat; fi ) | jq --slurp -R '
+{
+	"blocks": [
+		{
+			"type": "section",
+			"text": {
+				"text": "*From: _'"$bot_source"'_*",
+				"type": "mrkdwn"
+			}
+		},
+		{
+			"type": "section",
+			"text": {
+                                "text": (.|tostring),
+				"type": "plain_text"
+			}
+		}
+	]
+}' | \
+            curl -s -X POST -H 'Content-type: application/json' --data "@-" \
+                https://hooks.slack.com/services/<slack_webhook> > /dev/null
+fi

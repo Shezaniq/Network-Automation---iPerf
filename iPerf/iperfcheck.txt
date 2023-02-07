@@ -1,0 +1,124 @@
+#!/bin/sh
+#set -x
+
+# Install jq in both servers
+
+if [ $# -ne 2 ] ; then
+    echo Run as iperfcheck [my-instance-name] [server-address]  '>' my.csv
+    echo my-instance-name is used to identify this ipercheck instance
+    echo in its Slack messages.
+    exit 1
+    # Run like this it will print all the threshold checks (see below in
+    # find_problems) to the console and save a CSV file to 'my.csv' with
+    # relevant output for every run.
+fi
+
+bot_source="$1"
+# Used by notipush
+export bot_source
+# Target host
+host="$2"
+
+
+
+# Change these settings
+
+rate=180M # per session
+sessions=5
+
+duration=2  # seconds per test report
+
+# You can change these thresholds and add others by copying the 'if
+# Note that the '>' or '<' has to be in quotes
+
+# For a list of columns, see the 'cols=...' line below.
+
+find_problems() {
+    check_threshold lost_packets '>' 0 "Warning: Packets are being lost! Number of Packets Lost "
+    check_threshold packets == 0 "Warning: no packets expected; is iperf server unreachable?"
+
+    # Note: this jitter threshold is very very low so that something gets printed.
+    #check_threshold jitter_ms '>' 0.0001 "Jitter is higher than expected"
+}
+
+######################################################################
+# YOU SHOULD NOT NEED TO CHANGE ANYTHING BELOW HERE
+
+
+# Run a server in the background.  Restart it if it stops.
+#while sleep 0.5; do
+#    iperf3 -s
+#done &
+
+
+tempfile=/tmp/out.json
+
+cols="seconds bytes bits_per_second jitter_ms lost_packets packets lost_percent"
+
+comma_cols="$(echo $cols | sed -e 's/  */,/g')"
+jq_cols="$(for f in $cols; do echo .end.sum.$f; done)"
+jq_cols_list="$(echo $jq_cols | sed -e 's/  */,/g')"
+
+# Threshold check
+check_threshold() {
+    # e.g. "check_threshold jitter_ms > 10"
+    value_name="$1"
+    op="$2"
+    limit="$3"
+    message="$4"
+
+    if [ $(jq -r ".end.sum.$value_name $op $limit " < "$tempfile") = 'true' ] ; then
+         echo "$message:" "$(jq -r ".end.sum.$value_name" < "$tempfile")" "$op" "$limit" | ./notislack
+	#echo "$message:" "$(jq -r ".end.sum.$value_name")" "$op" "$limit" | ./notipush
+        #echo "$message" | ./notipush
+    fi
+}
+
+no_traffic() {
+    msg="$1"
+
+    # Output this when iperf is not able to run or has no data on traffic.
+    # Note that packets==0, indicating 'no test'
+    # Typically this reports in at the end of a time period rather than at the
+    # start, which is off by a few seconds from how iperf might do it.
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S"),0,0,0,0,0,0,0,no test - $msg"
+
+    echo "No test ran - $msg" | ./notislack
+}
+
+# Header line
+echo "time,$comma_cols"
+while sleep 1; do
+    # A test running $duration with one iteration of $duration
+    # Parallel with $sessions sessions, each at $rate for total rate $rate * $sessions
+
+    if iperf3 -c $host \
+           --parallel $sessions \
+           -i $duration -t $duration \
+           -b $rate \
+           -u \
+	   --connect-timeout 1000 \
+           --json > "$tempfile" ; then
+
+        # iperf might not be happy, but it did run.
+
+
+        if [ "$(jq -r '.start.connected | length > 0' < "$tempfile")" = 'false' ] ; then
+            # Test could not be run.
+            no_traffic "iperf ran but could not reach server"
+        else
+
+            # Output changed to be CSV, printed on stdout
+            # Date reformatted to yyyy-mm-dd hh:mm:ss because (a) Excel likes it and
+            # (b) it's a standard replicated in the no-dataline.
+            jq -r '[(.start.timestamp.time| strptime("%A, %d %b %Y %H:%M:%S %Z")|strftime("%Y-%m-%d %H:%M:%S")),'"$jq_cols_list"']|@csv'< "$tempfile"
+
+            # Run notification checks
+            find_problems
+        fi
+   else
+       no_traffic "iperf failed to run"
+   fi
+
+done
